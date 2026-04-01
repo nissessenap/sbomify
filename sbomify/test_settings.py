@@ -92,6 +92,9 @@ SIGNED_URL_SALT = "test-signed-url-salt-unique-per-installation"
 
 SECRET_KEY = "django-insecure-test-key-do-not-use-in-production"  # nosec B105 - This is a test-only key
 
+# Object storage settings
+STORAGE_BACKEND = "s3"
+
 # Mock AWS settings for testing
 AWS_REGION = "test-region"
 AWS_ENDPOINT_URL_S3 = "http://test-s3.localhost"
@@ -107,6 +110,12 @@ AWS_DOCUMENTS_ACCESS_KEY_ID = "test-key"  # nosec B105
 AWS_DOCUMENTS_SECRET_ACCESS_KEY = "test-secret"  # nosec B105
 AWS_DOCUMENTS_STORAGE_BUCKET_NAME = "test-documents-bucket"
 AWS_DOCUMENTS_STORAGE_BUCKET_URL = "http://test-s3.localhost/test-documents-bucket"
+
+# GCS test settings (fake-gcs-server)
+GCS_PROJECT_ID = "test-project"
+GCS_ENDPOINT_URL = "http://fake-gcs:4443"
+GCS_USE_EMULATOR = True
+GCS_SIGNING_SERVICE_ACCOUNT = ""
 
 APP_BASE_URL = "http://localhost:8001"
 TRUST_CENTER_DOMAIN = ""  # Opt-in per test via @override_settings(TRUST_CENTER_DOMAIN="trustcenters.test")

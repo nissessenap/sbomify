@@ -651,7 +651,10 @@ JWT_ISSUER = os.environ.get("JWT_ISSUER", "sbomify")
 JWT_ALGORITHM = os.environ.get("JWT_ALGORITHM", "HS256")
 JWT_AUDIENCE = os.environ.get("JWT_AUDIENCE", "sbomify")
 
-# Localstack and AWS/S3 related settings
+# Object storage settings
+STORAGE_BACKEND = os.environ.get("STORAGE_BACKEND", "s3")
+
+# AWS/S3 related settings
 AWS_REGION = os.environ.get("AWS_REGION", "")
 AWS_ENDPOINT_URL_S3 = os.environ.get("AWS_ENDPOINT_URL_S3", "")
 
@@ -670,6 +673,14 @@ AWS_DOCUMENTS_ACCESS_KEY_ID = os.environ.get("AWS_DOCUMENTS_ACCESS_KEY_ID", AWS_
 AWS_DOCUMENTS_SECRET_ACCESS_KEY = os.environ.get("AWS_DOCUMENTS_SECRET_ACCESS_KEY", AWS_SBOMS_SECRET_ACCESS_KEY)
 AWS_DOCUMENTS_STORAGE_BUCKET_NAME = os.environ.get("AWS_DOCUMENTS_STORAGE_BUCKET_NAME", AWS_SBOMS_STORAGE_BUCKET_NAME)
 AWS_DOCUMENTS_STORAGE_BUCKET_URL = os.environ.get("AWS_DOCUMENTS_STORAGE_BUCKET_URL", AWS_SBOMS_STORAGE_BUCKET_URL)
+
+# GCS settings (only used when STORAGE_BACKEND=gcs)
+GCS_PROJECT_ID = os.environ.get("GCS_PROJECT_ID", "")
+GCS_ENDPOINT_URL = os.environ.get("GCS_ENDPOINT_URL", "")
+GCS_USE_EMULATOR = os.environ.get("GCS_USE_EMULATOR", "").lower() in ("true", "1", "yes")
+# SA email for signing URLs with Workload Identity. Required for presigned URLs on GKE.
+# Not needed when using a service account key file or in emulator mode.
+GCS_SIGNING_SERVICE_ACCOUNT = os.environ.get("GCS_SIGNING_SERVICE_ACCOUNT", "")
 
 if DEBUG:
     # CSRF settings for development
