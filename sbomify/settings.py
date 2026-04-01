@@ -674,6 +674,14 @@ AWS_DOCUMENTS_SECRET_ACCESS_KEY = os.environ.get("AWS_DOCUMENTS_SECRET_ACCESS_KE
 AWS_DOCUMENTS_STORAGE_BUCKET_NAME = os.environ.get("AWS_DOCUMENTS_STORAGE_BUCKET_NAME", AWS_SBOMS_STORAGE_BUCKET_NAME)
 AWS_DOCUMENTS_STORAGE_BUCKET_URL = os.environ.get("AWS_DOCUMENTS_STORAGE_BUCKET_URL", AWS_SBOMS_STORAGE_BUCKET_URL)
 
+# GCS settings (only used when STORAGE_BACKEND=gcs)
+GCS_PROJECT_ID = os.environ.get("GCS_PROJECT_ID", "")
+GCS_ENDPOINT_URL = os.environ.get("GCS_ENDPOINT_URL", "")
+GCS_USE_EMULATOR = os.environ.get("GCS_USE_EMULATOR", "").lower() in ("true", "1", "yes")
+# SA email for signing URLs with Workload Identity. Required for presigned URLs on GKE.
+# Not needed when using a service account key file or in emulator mode.
+GCS_SIGNING_SERVICE_ACCOUNT = os.environ.get("GCS_SIGNING_SERVICE_ACCOUNT", "")
+
 if DEBUG:
     # CSRF settings for development
     CSRF_TRUSTED_ORIGINS = [

@@ -74,6 +74,12 @@ class MockStorageClient:
             raise Exception(self.error_message)
         return self.uploaded_files.get(file_path)
 
+    def object_exists(self, bucket_name: str, key: str) -> bool:
+        """Mock object_exists method."""
+        if self.should_raise_error:
+            raise Exception(self.error_message)
+        return key in self.uploaded_files
+
     def delete_object(self, bucket_name: str, object_name: str) -> None:
         """Mock delete_object method."""
         if self.should_raise_error:

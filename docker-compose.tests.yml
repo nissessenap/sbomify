@@ -43,6 +43,18 @@ services:
       testnet:
         ipv4_address: 172.25.0.11
 
+  fake-gcs:
+    image: fsouza/fake-gcs-server:1.52.1
+    command: ["-scheme", "http", "-port", "4443", "-external-url", "http://172.25.0.14:4443"]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:4443/storage/v1/b || exit 1"]
+      interval: 2s
+      timeout: 2s
+      retries: 10
+    networks:
+      testnet:
+        ipv4_address: 172.25.0.14
+
   tests:
     build:
       context: .
@@ -60,6 +72,9 @@ services:
       PLAYWRIGHT_CDP_ENDPOINT: http://172.25.0.11:9222
       DJANGO_SETTINGS_MODULE: sbomify.test_settings
       REDIS_HOST: 172.25.0.13:6379
+      GCS_ENDPOINT_URL: http://172.25.0.14:4443
+      GCS_PROJECT_ID: test-project
+      GCS_USE_EMULATOR: "true"
     volumes:
       - ./sbomify:/code/sbomify:ro
       - ./sbomify/apps/core/tests/e2e/__diffs__:/code/sbomify/apps/core/tests/e2e/__diffs__
@@ -71,6 +86,8 @@ services:
       db:
         condition: service_healthy
       redis:
+        condition: service_healthy
+      fake-gcs:
         condition: service_healthy
     networks:
       testnet:

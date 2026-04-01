@@ -3,9 +3,11 @@ from unittest.mock import Mock
 import pytest
 from botocore.exceptions import ClientError
 from django.conf import settings
+from google.api_core.exceptions import Forbidden as GCSForbidden
+from google.api_core.exceptions import NotFound as GCSNotFound
 from pytest_mock.plugin import MockerFixture
 
-from sbomify.apps.core.object_store import ObjectStoreClient, S3ObjectStoreClient, StorageClient
+from sbomify.apps.core.object_store import GCSObjectStoreClient, ObjectStoreClient, S3ObjectStoreClient, StorageClient
 
 # ---------------------------------------------------------------------------
 # ObjectStoreClient (abstract base)
@@ -175,6 +177,192 @@ class TestS3ObjectStoreClient:
         with pytest.raises(ClientError):
             store.put_object("my-bucket", "key", b"data")
 
+    def test_object_exists_true(self, s3_store):
+        store, mock_s3 = s3_store
+        store.object_exists("my-bucket", "path/to/key")
+        mock_s3.Object.assert_called_with("my-bucket", "path/to/key")
+        mock_s3.Object.return_value.load.assert_called_once()
+
+    def test_object_exists_false(self, s3_store):
+        store, mock_s3 = s3_store
+        mock_s3.Object.return_value.load.side_effect = ClientError(
+            error_response={"Error": {"Code": "404"}},
+            operation_name="HeadObject",
+        )
+        assert store.object_exists("my-bucket", "missing/key") is False
+
+    def test_object_exists_raises_on_other_errors(self, s3_store):
+        store, mock_s3 = s3_store
+        mock_s3.Object.return_value.load.side_effect = ClientError(
+            error_response={"Error": {"Code": "AccessDenied"}},
+            operation_name="HeadObject",
+        )
+        with pytest.raises(ClientError):
+            store.object_exists("my-bucket", "path/to/key")
+
+
+# ---------------------------------------------------------------------------
+# GCSObjectStoreClient
+# ---------------------------------------------------------------------------
+
+
+class TestGCSObjectStoreClient:
+    def test_init_with_emulator(self, mocker: MockerFixture):
+        mock_client_cls = mocker.patch("sbomify.apps.core.object_store.gcs_storage.Client")
+
+        GCSObjectStoreClient(
+            project_id="test-project",
+            endpoint_url="http://localhost:4443",
+            use_emulator=True,
+        )
+
+        mock_client_cls.assert_called_once()
+        call_kwargs = mock_client_cls.call_args
+        assert call_kwargs[1]["project"] == "test-project"
+        # AnonymousCredentials used in emulator mode
+        from google.auth.credentials import AnonymousCredentials
+
+        assert isinstance(call_kwargs[1]["credentials"], AnonymousCredentials)
+        assert call_kwargs[1]["client_options"] == {"api_endpoint": "http://localhost:4443"}
+
+    def test_init_with_endpoint_no_emulator(self, mocker: MockerFixture):
+        """Custom endpoint without emulator mode — for gov cloud or Private Service Connect."""
+        mock_client_cls = mocker.patch("sbomify.apps.core.object_store.gcs_storage.Client")
+
+        GCSObjectStoreClient(
+            project_id="my-project",
+            endpoint_url="https://storage.private.googleapis.com",
+            use_emulator=False,
+        )
+
+        mock_client_cls.assert_called_once()
+        call_kwargs = mock_client_cls.call_args
+        assert call_kwargs[1]["project"] == "my-project"
+        assert "credentials" not in call_kwargs[1]
+        assert call_kwargs[1]["client_options"] == {"api_endpoint": "https://storage.private.googleapis.com"}
+
+    def test_init_default(self, mocker: MockerFixture):
+        mock_client_cls = mocker.patch("sbomify.apps.core.object_store.gcs_storage.Client")
+
+        GCSObjectStoreClient(project_id="my-project")
+
+        mock_client_cls.assert_called_once_with(project="my-project")
+
+    @pytest.fixture
+    def gcs_store(self, mocker: MockerFixture):
+        mock_client_cls = mocker.patch("sbomify.apps.core.object_store.gcs_storage.Client")
+        store = GCSObjectStoreClient(project_id="test", endpoint_url="http://localhost:4443", use_emulator=True)
+        mock_client = mock_client_cls.return_value
+        return store, mock_client
+
+    def test_put_object(self, gcs_store):
+        store, mock_client = gcs_store
+        store.put_object("my-bucket", "path/to/key", b"hello")
+        mock_client.bucket.return_value.blob.return_value.upload_from_string.assert_called_once_with(b"hello")
+
+    def test_get_object(self, gcs_store):
+        store, mock_client = gcs_store
+        mock_client.bucket.return_value.blob.return_value.download_as_bytes.return_value = b"hello"
+        result = store.get_object("my-bucket", "path/to/key")
+        assert result == b"hello"
+
+    def test_get_object_returns_none_for_missing_key(self, gcs_store):
+        store, mock_client = gcs_store
+        mock_client.bucket.return_value.blob.return_value.download_as_bytes.side_effect = GCSNotFound("not found")
+        result = store.get_object("my-bucket", "missing/key")
+        assert result is None
+
+    def test_get_object_raises_on_other_errors(self, gcs_store):
+        store, mock_client = gcs_store
+        mock_client.bucket.return_value.blob.return_value.download_as_bytes.side_effect = GCSForbidden("forbidden")
+        with pytest.raises(GCSForbidden):
+            store.get_object("my-bucket", "path/to/key")
+
+    def test_object_exists_true(self, gcs_store):
+        store, mock_client = gcs_store
+        mock_client.bucket.return_value.blob.return_value.exists.return_value = True
+        assert store.object_exists("my-bucket", "path/to/key") is True
+
+    def test_object_exists_false(self, gcs_store):
+        store, mock_client = gcs_store
+        mock_client.bucket.return_value.blob.return_value.exists.return_value = False
+        assert store.object_exists("my-bucket", "missing/key") is False
+
+    def test_delete_object(self, gcs_store):
+        store, mock_client = gcs_store
+        store.delete_object("my-bucket", "path/to/key")
+        mock_client.bucket.return_value.blob.return_value.delete.assert_called_once()
+
+    def test_upload_file(self, gcs_store):
+        store, mock_client = gcs_store
+        store.upload_file("my-bucket", "/tmp/file.txt", "path/to/key")
+        mock_client.bucket.return_value.blob.return_value.upload_from_filename.assert_called_once_with("/tmp/file.txt")
+
+    def test_download_file(self, gcs_store):
+        store, mock_client = gcs_store
+        store.download_file("my-bucket", "path/to/key", "/tmp/file.txt")
+        mock_client.bucket.return_value.blob.return_value.download_to_filename.assert_called_once_with("/tmp/file.txt")
+
+    def test_generate_presigned_url_emulator(self, mocker: MockerFixture):
+        """Emulator mode returns a direct download URL (AnonymousCredentials cannot sign)."""
+        mocker.patch("sbomify.apps.core.object_store.gcs_storage.Client")
+        store = GCSObjectStoreClient(
+            project_id="test",
+            endpoint_url="http://localhost:4443",
+            use_emulator=True,
+        )
+
+        url = store.generate_presigned_url("my-bucket", "path/to/key", expires_in=7200)
+
+        assert url == "http://localhost:4443/storage/v1/b/my-bucket/o/path%2Fto%2Fkey?alt=media"
+
+    def test_generate_presigned_url_with_signing_sa(self, mocker: MockerFixture):
+        mock_client_cls = mocker.patch("sbomify.apps.core.object_store.gcs_storage.Client")
+        mock_auth_default = mocker.patch("sbomify.apps.core.object_store.auth_default")
+        mock_impersonated = mocker.patch("sbomify.apps.core.object_store.impersonated_credentials.Credentials")
+
+        mock_source_creds = Mock()
+        mock_auth_default.return_value = (mock_source_creds, "my-project")
+
+        store = GCSObjectStoreClient(
+            project_id="my-project",
+            signing_service_account="sa@project.iam.gserviceaccount.com",
+            use_emulator=False,
+        )
+
+        mock_blob = mock_client_cls.return_value.bucket.return_value.blob.return_value
+        mock_blob.generate_signed_url.return_value = "https://storage.example.com/signed"
+
+        url = store.generate_presigned_url("my-bucket", "path/to/key")
+
+        assert url == "https://storage.example.com/signed"
+        mock_impersonated.assert_called_once_with(
+            source_credentials=mock_source_creds,
+            target_principal="sa@project.iam.gserviceaccount.com",
+            target_scopes=["https://www.googleapis.com/auth/devstorage.read_only"],
+        )
+
+    def test_generate_presigned_url_key_file(self, mocker: MockerFixture):
+        """Without signing_service_account and not emulator — uses default credentials directly."""
+        mock_client_cls = mocker.patch("sbomify.apps.core.object_store.gcs_storage.Client")
+
+        store = GCSObjectStoreClient(project_id="my-project", use_emulator=False)
+
+        mock_blob = mock_client_cls.return_value.bucket.return_value.blob.return_value
+        mock_blob.generate_signed_url.return_value = "https://storage.example.com/signed"
+
+        url = store.generate_presigned_url("my-bucket", "path/to/key")
+        assert url == "https://storage.example.com/signed"
+        call_kwargs = mock_blob.generate_signed_url.call_args[1]
+        assert "credentials" not in call_kwargs
+        assert call_kwargs["version"] == "v4"
+
+    def test_error_propagation(self, gcs_store):
+        store, mock_client = gcs_store
+        mock_client.bucket.return_value.blob.return_value.upload_from_string.side_effect = GCSForbidden("forbidden")
+        with pytest.raises(GCSForbidden):
+            store.put_object("my-bucket", "key", b"data")
+
 
 # ---------------------------------------------------------------------------
 # StorageClient (domain wrapper, delegates to ObjectStoreClient)
@@ -225,6 +413,36 @@ class TestStorageClient:
             aws_access_key_id=None,
             aws_secret_access_key=None,
         )
+
+    def test_creates_gcs_store(self, mocker: MockerFixture):
+        mocker.stopall()
+        mocker.patch.object(settings, "STORAGE_BACKEND", "gcs")
+        mocker.patch.object(settings, "GCS_PROJECT_ID", "my-project")
+        mocker.patch.object(settings, "GCS_ENDPOINT_URL", "")
+        mocker.patch.object(settings, "GCS_SIGNING_SERVICE_ACCOUNT", "")
+        mocker.patch.object(settings, "GCS_USE_EMULATOR", False)
+        mock_gcs_client = mocker.patch("sbomify.apps.core.object_store.gcs_storage.Client")
+
+        client = StorageClient("SBOMS")
+
+        assert isinstance(client._store, GCSObjectStoreClient)
+        mock_gcs_client.assert_called_once_with(project="my-project")
+
+    def test_creates_gcs_store_with_emulator(self, mocker: MockerFixture):
+        mocker.stopall()
+        mocker.patch.object(settings, "STORAGE_BACKEND", "gcs")
+        mocker.patch.object(settings, "GCS_PROJECT_ID", "test-project")
+        mocker.patch.object(settings, "GCS_ENDPOINT_URL", "http://localhost:4443")
+        mocker.patch.object(settings, "GCS_SIGNING_SERVICE_ACCOUNT", "")
+        mocker.patch.object(settings, "GCS_USE_EMULATOR", True)
+        mock_gcs_client = mocker.patch("sbomify.apps.core.object_store.gcs_storage.Client")
+
+        client = StorageClient("SBOMS")
+
+        assert isinstance(client._store, GCSObjectStoreClient)
+        call_kwargs = mock_gcs_client.call_args[1]
+        assert call_kwargs["project"] == "test-project"
+        assert call_kwargs["client_options"] == {"api_endpoint": "http://localhost:4443"}
 
     def test_unsupported_backend_raises(self, mocker: MockerFixture):
         mocker.stopall()

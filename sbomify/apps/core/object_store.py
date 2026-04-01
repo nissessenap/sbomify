@@ -1,7 +1,7 @@
 """
 Object Storage
 
-Utilities for working with S3-compatible storage services.
+Utilities for working with S3-compatible and GCS storage services.
 Supports optional credentials to enable cloud workload identity (IRSA, Pod Identity, ADC).
 """
 
@@ -9,11 +9,18 @@ from __future__ import annotations
 
 import hashlib
 from abc import ABC, abstractmethod
+from datetime import timedelta
 from typing import Any, Literal
+from urllib.parse import quote
 
 import boto3
 from botocore.exceptions import ClientError
 from django.conf import settings
+from google.api_core.exceptions import NotFound as GCSNotFound
+from google.auth import default as auth_default
+from google.auth import impersonated_credentials
+from google.auth.credentials import AnonymousCredentials
+from google.cloud import storage as gcs_storage
 
 
 class ObjectStoreClient(ABC):
@@ -24,6 +31,9 @@ class ObjectStoreClient(ABC):
 
     @abstractmethod
     def get_object(self, bucket_name: str, key: str) -> bytes | None: ...
+
+    @abstractmethod
+    def object_exists(self, bucket_name: str, key: str) -> bool: ...
 
     @abstractmethod
     def delete_object(self, bucket_name: str, key: str) -> None: ...
@@ -69,6 +79,15 @@ class S3ObjectStoreClient(ObjectStoreClient):
                 return None
             raise
 
+    def object_exists(self, bucket_name: str, key: str) -> bool:
+        try:
+            self._resource.Object(bucket_name, key).load()
+            return True
+        except ClientError as e:
+            if e.response["Error"]["Code"] == "404":
+                return False
+            raise
+
     def delete_object(self, bucket_name: str, key: str) -> None:
         self._resource.Object(bucket_name, key).delete()
 
@@ -93,6 +112,97 @@ class S3ObjectStoreClient(ObjectStoreClient):
         return url
 
 
+class GCSObjectStoreClient(ObjectStoreClient):
+    """GCS storage backend using google-cloud-storage.
+
+    Supports three authentication modes:
+    - Emulator (use_emulator=True): AnonymousCredentials for fake-gcs-server
+    - ADC with custom endpoint: For government cloud or Private Service Connect
+    - Default ADC: Standard GCS with Application Default Credentials
+    """
+
+    def __init__(
+        self,
+        project_id: str | None = None,
+        endpoint_url: str | None = None,
+        signing_service_account: str | None = None,
+        use_emulator: bool = False,
+    ) -> None:
+        self._signing_service_account = signing_service_account
+        self._use_emulator = use_emulator
+        self._endpoint_url = endpoint_url
+
+        if use_emulator:
+            self._client: gcs_storage.Client = gcs_storage.Client(
+                project=project_id or "test-project",
+                credentials=AnonymousCredentials(),  # type: ignore[no-untyped-call]
+                client_options={"api_endpoint": endpoint_url} if endpoint_url else None,
+            )
+        elif endpoint_url:
+            self._client = gcs_storage.Client(
+                project=project_id or None,
+                client_options={"api_endpoint": endpoint_url},
+            )
+        else:
+            self._client = gcs_storage.Client(project=project_id or None)
+
+    def put_object(self, bucket_name: str, key: str, data: bytes) -> None:
+        self._client.bucket(bucket_name).blob(key).upload_from_string(data)
+
+    def get_object(self, bucket_name: str, key: str) -> bytes | None:
+        try:
+            return self._client.bucket(bucket_name).blob(key).download_as_bytes()  # type: ignore[no-any-return]
+        except GCSNotFound:
+            return None
+
+    def object_exists(self, bucket_name: str, key: str) -> bool:
+        return self._client.bucket(bucket_name).blob(key).exists()  # type: ignore[no-any-return]
+
+    def delete_object(self, bucket_name: str, key: str) -> None:
+        try:
+            self._client.bucket(bucket_name).blob(key).delete()
+        except GCSNotFound:
+            pass
+
+    def upload_file(self, bucket_name: str, file_path: str, key: str) -> None:
+        self._client.bucket(bucket_name).blob(key).upload_from_filename(file_path)
+
+    def download_file(self, bucket_name: str, key: str, file_path: str) -> None:
+        self._client.bucket(bucket_name).blob(key).download_to_filename(file_path)
+
+    def generate_presigned_url(self, bucket_name: str, key: str, expires_in: int = 3600) -> str:
+        blob = self._client.bucket(bucket_name).blob(key)
+
+        if self._use_emulator:
+            # AnonymousCredentials cannot sign — construct a direct download URL for the emulator
+            base = (self._endpoint_url or "").rstrip("/")
+            encoded_key = quote(key, safe="")
+            return f"{base}/storage/v1/b/{bucket_name}/o/{encoded_key}?alt=media"
+
+        if self._signing_service_account:
+            credentials, _ = auth_default()
+            signing_credentials = impersonated_credentials.Credentials(  # type: ignore[no-untyped-call]
+                source_credentials=credentials,
+                target_principal=self._signing_service_account,
+                target_scopes=["https://www.googleapis.com/auth/devstorage.read_only"],
+            )
+            url = blob.generate_signed_url(
+                expiration=timedelta(seconds=expires_in),
+                method="GET",
+                version="v4",
+                credentials=signing_credentials,
+            )
+            return url
+
+        # Service account key file — default credentials can sign directly
+        url = blob.generate_signed_url(
+            expiration=timedelta(seconds=expires_in),
+            method="GET",
+            version="v4",
+        )
+        return url
+
+
 def _create_store(bucket_type: Literal["MEDIA", "SBOMS", "DOCUMENTS"]) -> ObjectStoreClient:
     """Create a storage backend based on STORAGE_BACKEND setting."""
     if settings.STORAGE_BACKEND == "s3":
@@ -103,7 +213,15 @@ def _create_store(bucket_type: Literal["MEDIA", "SBOMS", "DOCUMENTS"]) -> Object
             secret_key=getattr(settings, f"AWS_{bucket_type}_SECRET_ACCESS_KEY", None) or None,
         )
 
-    raise ValueError(f"Unsupported STORAGE_BACKEND: {settings.STORAGE_BACKEND!r}. Supported values: 's3'")
+    if settings.STORAGE_BACKEND == "gcs":
+        return GCSObjectStoreClient(
+            project_id=getattr(settings, "GCS_PROJECT_ID", None) or None,
+            endpoint_url=getattr(settings, "GCS_ENDPOINT_URL", None) or None,
+            signing_service_account=getattr(settings, "GCS_SIGNING_SERVICE_ACCOUNT", None) or None,
+            use_emulator=bool(getattr(settings, "GCS_USE_EMULATOR", False)),
+        )
+
+    raise ValueError(f"Unsupported STORAGE_BACKEND: {settings.STORAGE_BACKEND!r}. Supported values: 's3', 'gcs'")
 
 
 class StorageClient:
